@@ -9,7 +9,7 @@ import jakarta.persistence.Table;
 public class UserDetails {
 
     @Id
-    private String emailId;   // Primary Key
+    private String emailId;   
 
     private Long phoneNumber;
     private String address;

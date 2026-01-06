@@ -1,87 +1,171 @@
 package com.community.volunteerhub.service;
 
+import com.community.volunteerhub.dto.UserRegisterRequest;
+import com.community.volunteerhub.dto.UserUpdateRequest;
 import com.community.volunteerhub.entity.UserDetails;
+import com.community.volunteerhub.entity.SessionToken;
 import com.community.volunteerhub.repository.UserDetailsRepository;
+import com.community.volunteerhub.repository.SessionTokenRepository;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Map;
+import java.sql.Timestamp;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class UserService {
 
-    @Autowired
-    private UserDetailsRepository repo;
+    private final UserDetailsRepository repo;
+    private final PasswordEncoder passwordEncoder;
 
     @Autowired
-    private PasswordEncoder passwordEncoder;
+    private SessionTokenRepository tokenRepo;
 
-    // simple in-memory session/token store: token -> email
-    private final Map<String, String> tokenStore = new ConcurrentHashMap<>();
+    @Autowired
+    public UserService(UserDetailsRepository repo, PasswordEncoder passwordEncoder) {
+        this.repo = repo;
+        this.passwordEncoder = passwordEncoder;
+    }
 
-    // Register (update your existing registration code to use this)
-    public void registerUser(UserDetails user) {
-        String email = user.getEmailId().toLowerCase().trim();
+    // Normalize email consistently
+    private String normalizeEmail(String email) {
+        return (email == null) ? null : email.toLowerCase().trim();
+    }
+
+    // REGISTER
+    @Transactional
+    public void registerUser(UserRegisterRequest req) {
+
+        String email = normalizeEmail(req.getEmailId());
+        if (email == null || email.isBlank()) {
+            throw new IllegalArgumentException("Email must not be empty");
+        }
+
         if (repo.existsById(email)) {
             throw new IllegalArgumentException("Email already registered");
         }
-        // hash password
-        user.setPassword(passwordEncoder.encode(user.getPassword()));
+
+        UserDetails user = new UserDetails();
         user.setEmailId(email);
+        user.setPassword(passwordEncoder.encode(req.getPassword()));
+        user.setAddress(req.getAddress());
+        user.setPhoneNumber(Long.valueOf(req.getPhoneNumber()));
+        user.setUserRole(req.getUserRole());
+
         repo.save(user);
     }
 
-    // Login: returns a session token on success
+    // LOGIN
+    @Transactional
     public String login(String email, String rawPassword) {
+        email = normalizeEmail(email);
+        if (email == null || email.isBlank()) {
+            return null;
+        }
+
         Optional<UserDetails> opt = repo.findById(email);
         if (opt.isEmpty()) return null;
+
         UserDetails user = opt.get();
-        if (passwordEncoder.matches(rawPassword, user.getPassword())) {
-            String token = UUID.randomUUID().toString();
-            tokenStore.put(token, email);
-            return token;
-        }
-        return null;
+        if (!passwordEncoder.matches(rawPassword, user.getPassword())) return null;
+
+        // Remove previous token (single session allowed)
+        tokenRepo.deleteByEmailId(email);
+
+        // Generate and save new token
+        String token = UUID.randomUUID().toString();
+
+        SessionToken session = new SessionToken();
+        session.setToken(token);
+        session.setEmailId(email);
+        session.setCreatedTime(new Timestamp(System.currentTimeMillis()));
+
+        tokenRepo.save(session);
+
+        return token;
     }
 
-    public boolean validateToken(String token) {
-        return token != null && tokenStore.containsKey(token);
+    public boolean isValidToken(String token) {
+        return token != null && tokenRepo.findByToken(token) != null;
     }
+
 
     public String getEmailFromToken(String token) {
-        return tokenStore.get(token);
+        SessionToken session = tokenRepo.findByToken(token);
+        return session != null ? session.getEmailId() : null;
     }
 
-    public void logout(String token) {
-        if (token != null) tokenStore.remove(token);
+
+    public boolean logout(String token) {
+        if (token == null) return false;
+
+        SessionToken session = tokenRepo.findByToken(token);
+        if (session == null) return false;
+
+        tokenRepo.delete(session);
+        return true;
     }
 
+
+    // GET PROFILE
     public UserDetails getProfile(String email) {
-        return repo.findById(email).orElse(null);
+        String norm = normalizeEmail(email);
+        if (norm == null) return null;
+        return repo.findById(norm).orElse(null);
     }
 
-    public UserDetails updateProfile(UserDetails updated) {
-        String email = updated.getEmailId();
-        Optional<UserDetails> opt = repo.findById(email);
-        if (opt.isEmpty()) throw new IllegalArgumentException("User not found");
-        UserDetails existing = opt.get();
-        if (updated.getPhoneNumber() != null) existing.setPhoneNumber(updated.getPhoneNumber());
-        if (updated.getAddress() != null) existing.setAddress(updated.getAddress());
-        if (updated.getUserRole() != null) existing.setUserRole(updated.getUserRole());
+    // UPDATE PROFILE
+    @Transactional
+    public UserDetails updateProfile(UserUpdateRequest req, String tokenEmail) {
+
+        String normalizedTokenEmail = normalizeEmail(tokenEmail);
+        if (normalizedTokenEmail == null) {
+            throw new SecurityException("Unauthorized");
+        }
+
+        // Request email must match token email
+        if (req.getEmailId() != null) {
+            String normalizedReqEmail = normalizeEmail(req.getEmailId());
+            if (!normalizedTokenEmail.equals(normalizedReqEmail)) {
+                throw new SecurityException("Cannot update another user's profile");
+            }
+        }
+
+        UserDetails existing = repo.findById(normalizedTokenEmail)
+                .orElseThrow(() -> new IllegalArgumentException("User not found"));
+
+        if (req.getPhoneNumber() != null)
+            existing.setPhoneNumber(req.getPhoneNumber());
+
+        if (req.getAddress() != null)
+            existing.setAddress(req.getAddress());
+
+        if (req.getUserRole() != null)
+            existing.setUserRole(req.getUserRole());
+
         return repo.save(existing);
     }
 
+    // RESET PASSWORD
+    @Transactional
     public boolean resetPassword(String email, String oldPassword, String newPassword) {
-        Optional<UserDetails> opt = repo.findById(email);
+        String norm = normalizeEmail(email);
+        if (norm == null || norm.isBlank()) return false;
+
+        Optional<UserDetails> opt = repo.findById(norm);
         if (opt.isEmpty()) return false;
+
         UserDetails existing = opt.get();
-        if (!passwordEncoder.matches(oldPassword, existing.getPassword())) return false;
+        if (!passwordEncoder.matches(oldPassword, existing.getPassword()))
+            return false;
+
         existing.setPassword(passwordEncoder.encode(newPassword));
         repo.save(existing);
+
         return true;
     }
 }

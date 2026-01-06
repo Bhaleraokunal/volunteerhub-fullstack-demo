@@ -4,7 +4,7 @@ public class ResetPasswordRequest {
     private String emailId;
     private String oldPassword; 
     private String newPassword;
-    // getters/setters
+     //getters/setters
     public String getEmailId() { return emailId; }
     public void setEmailId(String emailId) { this.emailId = emailId; }
     public String getOldPassword() { return oldPassword; }

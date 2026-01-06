@@ -4,7 +4,7 @@ public class UserUpdateRequest {
     private String emailId; // required to identify user
     private Long phoneNumber;
     private String address;
-    private String userRole; // optional if admin change - otherwise ignore
+    private String userRole; // 
     // getters/setters
     public String getEmailId() { return emailId; }
     public void setEmailId(String emailId) { this.emailId = emailId; }
